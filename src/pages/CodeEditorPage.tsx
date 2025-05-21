@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { useParams, useNavigate, useLocation } from 'react-router-dom';
-import { motion } from 'framer-motion';
+import { motion, AnimatePresence } from 'framer-motion';
 import { Play, Copy, Download, RotateCcw, ArrowLeft, Loader, Check, X, AlertCircle, Swords, Trophy as TrophyIcon, Clock, ArrowRight } from 'lucide-react';
 import Editor from 'react-simple-code-editor';
 import { highlight, languages } from 'prismjs';
@@ -33,10 +33,16 @@ const CodeEditorPage = () => {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const location = useLocation();
-  const { matchId, isRankedMatch, opponent } = location.state || {};
+  const { matchId: locationMatchId, isRankedMatch: locationIsRanked, opponent: locationOpponent } = location.state || {};
+  const [matchId, setMatchId] = useState<string | null>(locationMatchId || null);
+  const [isRankedMatch, setIsRankedMatch] = useState(locationIsRanked || false);
+  const [opponent, setOpponent] = useState<string | null>(locationOpponent || null);
   const problemId = id ? parseInt(id, 10) : 0;
   const [problem, setProblem] = useState<any>(null);
-  const [language, setLanguage] = useState('javascript');
+  const [language, setLanguage] = useState(() => {
+    const savedLanguage = localStorage.getItem('preferredLanguage');
+    return savedLanguage || 'javascript';
+  });
   const [code, setCode] = useState('');
   const [timer, setTimer] = useState(0);
   const [timerRunning, setTimerRunning] = useState(false);
@@ -44,14 +50,12 @@ const CodeEditorPage = () => {
   const { currentUser } = useAuth();
   const [startTime] = useState(Date.now());
   
-  // Submission state
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [submissionResults, setSubmissionResults] = useState<SubmissionResultType[]>([]);
   const [submissionError, setSubmissionError] = useState<string | null>(null);
   const [showResults, setShowResults] = useState(false);
   
-  // Add match-specific state
-  const [matchTimeRemaining, setMatchTimeRemaining] = useState(600); // 10 minutes in seconds
+  const [matchTimeRemaining, setMatchTimeRemaining] = useState(600);
   const [matchStatus, setMatchStatus] = useState<'waiting' | 'in_progress' | 'completed'>('waiting');
   const [matchDetails, setMatchDetails] = useState<any>(null);
   const [opponentName, setOpponentName] = useState<string>(opponent || 'Opponent');
@@ -64,19 +68,55 @@ const CodeEditorPage = () => {
   const [loserProfile, setLoserProfile] = useState<any>(null);
   const [checkingInterval, setCheckingInterval] = useState<NodeJS.Timeout | null>(null);
 
-  // Find problem by id
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const urlMatchId = params.get('matchId');
+    const urlIsRanked = params.get('ranked') === 'true';
+    const urlOpponent = params.get('opponent');
+
+    if (urlMatchId) setMatchId(urlMatchId);
+    if (urlIsRanked) setIsRankedMatch(true);
+    if (urlOpponent) setOpponent(urlOpponent);
+  }, []);
+
+  useEffect(() => {
+    if (matchId && isRankedMatch) {
+      const params = new URLSearchParams();
+      params.set('matchId', matchId);
+      params.set('ranked', 'true');
+      if (opponent) params.set('opponent', opponent);
+      
+      const newUrl = `${window.location.pathname}?${params.toString()}`;
+      window.history.replaceState({}, '', newUrl);
+    }
+  }, [matchId, isRankedMatch, opponent]);
+
   useEffect(() => {
     if (id) {
       const foundProblem = getProblemById(problemId);
       if (foundProblem) {
         setProblem(foundProblem);
-        // Set initial code snippet based on problem and language
-        setCode(getInitialCodeSnippet(language, problemId));
+        
+        const savedCode = localStorage.getItem(`code_${problemId}_${matchId || 'regular'}`);
+        if (savedCode) {
+          setCode(savedCode);
+        } else {
+          setCode(getInitialCodeSnippet(language, problemId));
+        }
       }
     }
-  }, [id, problemId]);
+  }, [id, problemId, language, matchId]);
 
-  // Clear interval on unmount
+  useEffect(() => {
+    if (code && problemId) {
+      localStorage.setItem(`code_${problemId}_${matchId || 'regular'}`, code);
+    }
+  }, [code, problemId, matchId]);
+
+  useEffect(() => {
+    localStorage.setItem('preferredLanguage', language);
+  }, [language]);
+
   useEffect(() => {
     return () => {
       if (checkingInterval) {
@@ -85,7 +125,6 @@ const CodeEditorPage = () => {
     };
   }, [checkingInterval]);
 
-  // Load opponent profile
   useEffect(() => {
     const loadOpponentProfile = async () => {
       if (opponent && currentUser) {
@@ -103,55 +142,57 @@ const CodeEditorPage = () => {
     loadOpponentProfile();
   }, [opponent, currentUser]);
 
-  // Load match details if this is a ranked match
   useEffect(() => {
     const loadMatchDetails = async () => {
-      if (isRankedMatch && matchId) {
+      if (isRankedMatch && matchId && currentUser) {
         try {
           const match = await getMatch(matchId);
           if (match) {
             setMatchDetails(match);
-            setMatchStatus('in_progress');
             
-            // If match already has submissions, check if we need to show results
-            if (match.submissions && match.submissions[currentUser?.uid || '']) {
-              // User has already submitted, show their results
-              setShowResults(true);
+            if (match.status === 'completed') {
               setMatchStatus('completed');
-            }
-            
-            // Check if match is completed and has a winner
-            if (match.status === 'completed' && match.winner) {
-              const winnerId = match.winner;
-              const loserId = winnerId === match.player1 ? match.player2 : match.player1;
+              setShowResults(true);
               
-              setMatchWinner(winnerId);
-              setMatchLoser(loserId);
-              setShowMatchResults(true);
-              
-              // Load profiles for winner and loser
-              try {
-                const { data: winnerData } = await getUserProfile(winnerId);
-                const { data: loserData } = await getUserProfile(loserId);
+              if (match.winner) {
+                setMatchWinner(match.winner);
+                setMatchLoser(match.winner === match.player1 ? match.player2 : match.player1);
+                setShowMatchResults(true);
                 
-                if (winnerData) setWinnerProfile(winnerData);
-                if (loserData) setLoserProfile(loserData);
-              } catch (error) {
-                console.error("Failed to load winner/loser profiles:", error);
+                try {
+                  const { data: winnerData } = await getUserProfile(match.winner);
+                  const { data: loserData } = await getUserProfile(
+                    match.winner === match.player1 ? match.player2 : match.player1
+                  );
+                  
+                  if (winnerData) setWinnerProfile(winnerData);
+                  if (loserData) setLoserProfile(loserData);
+                } catch (error) {
+                  console.error("Failed to load winner/loser profiles:", error);
+                }
+              }
+            } else {
+              setMatchStatus('in_progress');
+              
+              const elapsedTime = Math.floor((Date.now() - match.startTime) / 1000);
+              const remainingTime = Math.max(0, 600 - elapsedTime);
+              setMatchTimeRemaining(remainingTime);
+              
+              if (match.submissions[currentUser.uid]) {
+                setShowResults(true);
+                setCode(match.submissions[currentUser.uid].code);
+                setTimerRunning(false);
               }
             }
             
-            // Set up interval to check for opponent updates
             const intervalId = setInterval(async () => {
               try {
                 const updatedMatch = await getMatch(matchId);
                 if (updatedMatch && updatedMatch.submissions) {
-                  // Check for opponent submission
-                  const opponentId = updatedMatch.player1 === currentUser?.uid ? 
+                  const opponentId = updatedMatch.player1 === currentUser.uid ? 
                     updatedMatch.player2 : updatedMatch.player1;
                   
                   if (updatedMatch.submissions[opponentId]) {
-                    // Opponent has submitted
                     const submissionTime = new Date(updatedMatch.submissions[opponentId].submissionTime)
                       .toLocaleTimeString();
                     
@@ -159,58 +200,16 @@ const CodeEditorPage = () => {
                       `${opponentName} submitted their solution at ${submissionTime}.`
                     );
                     
-                    // If match is completed and has a winner
                     if (updatedMatch.status === 'completed' && updatedMatch.winner) {
-                      const winnerId = updatedMatch.winner;
-                      const loserId = winnerId === updatedMatch.player1 ? updatedMatch.player2 : updatedMatch.player1;
-                      
-                      setMatchWinner(winnerId);
-                      setMatchLoser(loserId);
-                      setShowMatchResults(true);
-                      setMatchStatus('completed');
-                      
-                      // Load profiles for winner and loser
-                      try {
-                        const { data: winnerData } = await getUserProfile(winnerId);
-                        const { data: loserData } = await getUserProfile(loserId);
-                        
-                        if (winnerData) setWinnerProfile(winnerData);
-                        if (loserData) setLoserProfile(loserData);
-                        
-                        // Update rank points for winner and loser if not already updated
-                        if (!resultsUpdated && currentUser && !updatedMatch.pointsAwarded) {
-                          try {
-                            // Only update once, and only if the match hasn't been processed
-                            const updateResult = await updateMatchResults(winnerId, loserId);
-                            
-                            if (updateResult.success) {
-                              if (updateResult.alreadyProcessed) {
-                                console.log("Points were already awarded for this match");
-                              } else {
-                                console.log("Match results updated successfully");
-                              }
-                              setResultsUpdated(true);
-                            } else {
-                              console.error("Match results update failed:", updateResult.error);
-                              setSubmissionError(`Failed to update match results: ${updateResult.error}`);
-                            }
-                          } catch (error: any) {
-                            console.error("Error updating match results:", error);
-                            setSubmissionError(`Error updating match results: ${error.message}`);
-                          }
-                        }
-                      } catch (error) {
-                        console.error("Failed to load winner/loser profiles:", error);
-                      }
+                      handleMatchCompletion(updatedMatch);
                     }
                   }
                 }
               } catch (e) {
                 console.error("Error checking for match updates:", e);
               }
-            }, 3000); // Check every 3 seconds
+            }, 3000);
             
-            // Save the interval ID for cleanup
             setCheckingInterval(intervalId);
           }
         } catch (error) {
@@ -220,19 +219,50 @@ const CodeEditorPage = () => {
       }
     };
     
-    if (isRankedMatch && matchId && currentUser) {
-      loadMatchDetails();
-    }
-  }, [isRankedMatch, matchId, currentUser, opponentName, resultsUpdated]);
+    loadMatchDetails();
+  }, [isRankedMatch, matchId, currentUser, opponentName]);
 
-  // Handle language change
-  useEffect(() => {
-    if (problemId) {
-      setCode(getInitialCodeSnippet(language, problemId));
+  const handleMatchCompletion = async (match: any) => {
+    const winnerId = match.winner;
+    const loserId = winnerId === match.player1 ? match.player2 : match.player1;
+    
+    setMatchWinner(winnerId);
+    setMatchLoser(loserId);
+    setShowMatchResults(true);
+    setMatchStatus('completed');
+    
+    try {
+      const { data: winnerData } = await getUserProfile(winnerId);
+      const { data: loserData } = await getUserProfile(loserId);
+      
+      if (winnerData) setWinnerProfile(winnerData);
+      if (loserData) setLoserProfile(loserData);
+      
+      if (!resultsUpdated && currentUser && !match.pointsAwarded) {
+        try {
+          const updateResult = await updateMatchResults(winnerId, loserId);
+          
+          if (updateResult.success) {
+            if (updateResult.alreadyProcessed) {
+              console.log("Points were already awarded for this match");
+            } else {
+              console.log("Match results updated successfully");
+            }
+            setResultsUpdated(true);
+          } else {
+            console.error("Match results update failed:", updateResult.error);
+            setSubmissionError(`Failed to update match results: ${updateResult.error}`);
+          }
+        } catch (error: any) {
+          console.error("Error updating match results:", error);
+          setSubmissionError(`Error updating match results: ${error.message}`);
+        }
+      }
+    } catch (error) {
+      console.error("Failed to load winner/loser profiles:", error);
     }
-  }, [language, problemId]);
+  };
 
-  // Handle timer
   useEffect(() => {
     let interval: NodeJS.Timeout | null = null;
 
@@ -249,14 +279,13 @@ const CodeEditorPage = () => {
     };
   }, [timerRunning]);
 
-  // Handle match timer
   useEffect(() => {
     if (isRankedMatch && matchStatus === 'in_progress') {
       const timer = setInterval(() => {
         setMatchTimeRemaining(prev => {
           if (prev <= 0) {
             clearInterval(timer);
-            handleSubmit(); // Auto-submit when time runs out
+            handleSubmit();
             return 0;
           }
           return prev - 1;
@@ -267,7 +296,6 @@ const CodeEditorPage = () => {
     }
   }, [isRankedMatch, matchStatus]);
 
-  // Start timer when typing begins
   const handleCodeChange = (newCode: string) => {
     setCode(newCode);
 
@@ -275,9 +303,10 @@ const CodeEditorPage = () => {
       setIsTyping(true);
       setTimerRunning(true);
     }
+    
+    localStorage.setItem(`code_${problemId}_${matchId || 'regular'}`, newCode);
   };
 
-  // Format time for display
   const formatTime = (seconds: number) => {
     const hrs = Math.floor(seconds / 3600);
     const mins = Math.floor((seconds % 3600) / 60);
@@ -286,35 +315,36 @@ const CodeEditorPage = () => {
     return `${hrs.toString().padStart(2, '0')}:${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
   };
 
-  // Format match time for display
   const formatMatchTime = (seconds: number) => {
     const mins = Math.floor(seconds / 60);
     const secs = seconds % 60;
     return `${mins}:${secs.toString().padStart(2, '0')}`;
   };
 
-  // Handle language selection
   const handleLanguageChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
-    setLanguage(e.target.value);
+    const newLanguage = e.target.value;
+    setLanguage(newLanguage);
+    localStorage.setItem('preferredLanguage', newLanguage);
+    
+    if (!code || code === getInitialCodeSnippet(language, problemId)) {
+      setCode(getInitialCodeSnippet(newLanguage, problemId));
+    }
   };
 
-  // Create default test cases if none exist
   const getTestCases = useCallback((): TestCase[] => {
     if (problem && problem.testCases && problem.testCases.length > 0) {
       return problem.testCases;
     }
     
-    // If no test cases exist, create default ones from examples
     if (problem && problem.examples && problem.examples.length > 0) {
       return problem.examples.map((example: any, index: number) => {
-        // Clean up the input and output
         const input = example.input
-          .replace(/^.*=\s*/, '') // Remove variable name and equals
-          .replace(/\[|\]|\"|\'/g, '') // Remove brackets and quotes
+          .replace(/^.*=\s*/, '')
+          .replace(/\[|\]|\"|\'/g, '')
           .trim();
         
         const output = example.output
-          .replace(/\[|\]|\"|\'/g, '') // Remove brackets and quotes
+          .replace(/\[|\]|\"|\'/g, '')
           .trim();
         
         return {
@@ -328,10 +358,9 @@ const CodeEditorPage = () => {
     return [];
   }, [problem]);
 
-  // Handle code submission
   const handleSubmit = async () => {
     if (matchStatus === 'completed') {
-      return; // Don't allow resubmission if already completed
+      return;
     }
     
     try {
@@ -341,7 +370,7 @@ const CodeEditorPage = () => {
       setSubmissionResults([]);
       setShowResults(true);
       
-      const testCases = getTestCases().slice(0, 3); // Process up to 3 test cases
+      const testCases = getTestCases().slice(0, 3);
       
       if (testCases.length === 0) {
         setSubmissionError('No test cases available for this problem.');
@@ -359,7 +388,6 @@ const CodeEditorPage = () => {
 
         if (isRankedMatch && matchId) {
           console.log('Submitting ranked match solution:', matchId);
-          // Submit solution for ranked match
           try {
             const success = await submitMatchSolution(
               matchId,
@@ -381,7 +409,6 @@ const CodeEditorPage = () => {
           }
         } else if (allPassed) {
           console.log('All tests passed! Updating problem status.');
-          // Update regular problem status
           try {
             const updateResult = await updateProblemSolved(currentUser.uid, problemId, solveTime);
             if (!updateResult.success) {
@@ -401,7 +428,6 @@ const CodeEditorPage = () => {
     }
   };
 
-  // Handle back button click
   const handleGoBack = () => {
     if (isRankedMatch) {
       if (window.confirm('Are you sure you want to leave the ranked match?')) {
@@ -412,12 +438,10 @@ const CodeEditorPage = () => {
     }
   };
 
-  // Navigate to leaderboard
   const handleViewLeaderboard = () => {
     navigate('/leaderboard');
   };
 
-  // Copy code to clipboard
   const handleCopyCode = () => {
     navigator.clipboard.writeText(code)
       .then(() => {
@@ -428,7 +452,6 @@ const CodeEditorPage = () => {
       });
   };
 
-  // Download code
   const handleDownloadCode = () => {
     const element = document.createElement('a');
     const file = new Blob([code], {type: 'text/plain'});
@@ -439,14 +462,14 @@ const CodeEditorPage = () => {
     document.body.removeChild(element);
   };
 
-  // Reset code to initial state
   const handleResetCode = () => {
     if (window.confirm('Are you sure you want to reset your code to the initial template?')) {
-      setCode(getInitialCodeSnippet(language, problemId));
+      const newCode = getInitialCodeSnippet(language, problemId);
+      setCode(newCode);
+      localStorage.setItem(`code_${problemId}_${matchId || 'regular'}`, newCode);
     }
   };
 
-  // Find new match
   const handleFindNewMatch = () => {
     navigate('/ranked-match');
   };
@@ -474,7 +497,6 @@ const CodeEditorPage = () => {
     );
   }
 
-  // Render match results overlay if the match is complete
   if (showMatchResults && matchWinner && matchLoser) {
     const isWinner = currentUser && matchWinner === currentUser.uid;
     const profileToShow = isWinner ? winnerProfile : loserProfile;
@@ -644,7 +666,6 @@ const CodeEditorPage = () => {
         <Navbar />
 
         <main className="flex-grow flex flex-col md:flex-row">
-          {/* Problem Description Panel */}
           <motion.div
             initial={{ opacity: 0, x: -20 }}
             animate={{ opacity: 1, x: 0 }}
@@ -736,14 +757,13 @@ const CodeEditorPage = () => {
                 )}
               </div>
 
-              {/* Opponent Updates */}
               {opponentUpdates && (
                 <div className="mt-6 bg-blue-500 bg-opacity-20 text-blue-400 p-4 rounded-lg">
-                  <p>{opponentUpdates}</p>
+                  <p>{opponentUpdates}
+                  </p>
                 </div>
               )}
 
-              {/* Submission Results */}
               {showResults && (
                 <div className="mt-6">
                   <h2 className="text-xl font-semibold mb-3">Submission Results</h2>
@@ -773,7 +793,6 @@ const CodeEditorPage = () => {
                             />
                           ))}
                           
-                          {/* Overall Result Summary */}
                           <div className="bg-[var(--primary)] p-4 rounded-lg">
                             <div className="flex items-center">
                               {submissionResults.every(result => result.status.id === statusCodes.ACCEPTED) ? (
@@ -808,7 +827,6 @@ const CodeEditorPage = () => {
             </div>
           </motion.div>
           
-          {/* Code Editor Panel */}
           <motion.div
             initial={{ opacity: 0, x: 20 }}
             animate={{ opacity: 1, x: 0 }}
@@ -859,7 +877,6 @@ const CodeEditorPage = () => {
               </div>
             </div>
             
-            {/* Improved editor container for better scrolling */}
             <div className="flex-grow overflow-y-auto" style={{ position: 'relative' }}>
               <div style={{ position: 'absolute', top: 0, right: 0, bottom: 0, left: 0, overflow: 'auto' }}>
                 <Editor
